@@ -1,16 +1,24 @@
-name: teoheberg earn coins (WARP)
+name: teoheberg earn coins (WARP + Playwright)
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 8,16 * * *" # 每天 UTC 8:00 和 16:00
+    - cron: "0 8,16 * * *"   # 每天 UTC 8:00 和 16:00（北京时间 16:00 和 00:00）
 
 jobs:
   run:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
+
     steps:
+      # =========================
+      # 当前仓库
+      # =========================
       - uses: actions/checkout@v4
 
+      # =========================
+      # 私有仓库（存放脚本和扩展）
+      # =========================
       - name: Checkout private repo
         uses: actions/checkout@v4
         with:
@@ -18,32 +26,38 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: scripts
 
+      # =========================
+      # WARP（欧洲IP，提高成功率）
+      # =========================
       - name: 创建 WARP 网络
         uses: fscarmen/warp-on-actions@v1.3
         with:
           stack: dual
           mode: client
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      # =========================
+      # Node.js 环境
+      # =========================
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          python-version: "3.11"
+          node-version: 20
 
+      # =========================
+      # 系统依赖（音频 + xvfb + 解压工具）
+      # =========================
       - name: 安装系统依赖
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            xvfb xdotool wget curl jq p7zip-full unzip \
+            xvfb wget curl jq p7zip-full unzip \
             pulseaudio alsa-utils ffmpeg \
             libnss3 libgbm1 libasound2
 
-      - name: 安装 Google Chrome
-        run: |
-          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y /tmp/chrome.deb || (sudo dpkg -i /tmp/chrome.deb && sudo apt-get install -f -y)
-          google-chrome --version
-
-      - name: 启动虚拟音频设备（Buster 音频识别关键）
+      # =========================
+      # 启动虚拟音频设备（Buster 音频识别关键）
+      # =========================
+      - name: 启动虚拟音频设备
         run: |
           pulseaudio --start --exit-idle-time=-1 --daemon || true
           sleep 2
@@ -55,52 +69,61 @@ jobs:
           pactl list short sinks
           pactl list short sources
 
-      - name: 安装 Python 依赖
+      # =========================
+      # 安装 Playwright + Chromium
+      # =========================
+      - name: Install Playwright
         run: |
-          pip install -q seleniumbase requests
-          python -m seleniumbase install chromedriver --force || true
+          cd scripts
+          npm init -y
+          npm install playwright
+          npx playwright install chromium --with-deps
 
-      - name: 下载并解压 Buster 扩展
+      # =========================
+      # 下载并解压 Buster 扩展
+      # =========================
+      - name: 下载 Buster 扩展
         run: |
-          mkdir -p scripts/extensions/buster/unpacked
+          mkdir -p scripts/extensions/buster
           wget -q -O scripts/extensions/buster/buster.zip \
             https://github.com/dessant/buster/releases/download/v3.1.0/buster_captcha_solver_for_humans-3.1.0-chrome.zip
+
+      - name: 解压 Buster 扩展
+        run: |
+          mkdir -p scripts/extensions/buster/unpacked
           7z x -y scripts/extensions/buster/buster.zip -oscripts/extensions/buster/unpacked > /dev/null
           ls scripts/extensions/buster/unpacked/manifest.json && echo "✅ Buster 解压成功" || echo "⚠️ Buster manifest 未找到"
 
+      # =========================
+      # 检查当前 IP（调试用）
+      # =========================
       - name: 检查当前 IP
         run: |
           echo "🌍 当前 IP: $(curl -s https://api.ipify.org)"
           curl -s https://ipinfo.io | jq . || true
 
-      - name: 准备 makecoins.py
-        run: |
-          if [ -f scripts/makecoins.py ]; then
-            cp scripts/makecoins.py ./makecoins.py
-            echo "✅ 使用私有仓库 makecoins.py"
-          else
-            echo "📝 使用当前仓库 makecoins.py"
-          fi
-          ls -la makecoins.py
-
-      - name: 运行 makecoins.py
+      # =========================
+      # 运行 earn-coins.js
+      # =========================
+      - name: 运行 earn-coins.js
         env:
           TEO_EMAIL: ${{ secrets.TEO_EMAIL }}
           TEO_PASSWORD: ${{ secrets.TEO_PASSWORD }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          BUSTER_EXT_PATH: ${{ github.workspace }}/scripts/extensions/buster/unpacked
-          SCREENSHOTS_DIR: ${{ github.workspace }}/screenshots
         run: |
-          mkdir -p screenshots
+          mkdir -p scripts/screenshots
+          cd scripts
           xvfb-run -a --server-args="-screen 0 1920x1080x24 -ac" \
-            python makecoins.py
-        continue-on-error: true
+            node earn-coins.js
 
+      # =========================
+      # 上传截图（无论成功失败都上传）
+      # =========================
       - name: 上传截图
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: teoheberg-screenshots-${{ github.run_id }}
-          path: screenshots/
+          path: scripts/screenshots/
           retention-days: 7
