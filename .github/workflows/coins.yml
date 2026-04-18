@@ -1,0 +1,189 @@
+name: teoheberg earn coins (WARP)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8,16 * * *"   # 每天 UTC 8:00 和 16:00 各跑一次
+
+jobs:
+  run:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      # =========================
+      # 🟡 0️⃣ 当前仓库
+      # =========================
+      - uses: actions/checkout@v4
+
+      # =========================
+      # 🟡 ⭐ 私有仓库（含脚本）
+      # =========================
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/gaming4free-auto
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: scripts
+
+      # =========================
+      # 🟡 1️⃣ WARP（欧洲IP，避免Cloudflare拦截）
+      # =========================
+      - name: 创建 WARP 网络
+        uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+
+      # =========================
+      # 🟡 2️⃣ Python 环境
+      # =========================
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # =========================
+      # 🟡 3️⃣ 系统依赖
+      #    - xvfb: 虚拟显示（headed=True 需要）
+      #    - pulseaudio: 虚拟音频（Buster 音频验证需要）
+      #    - xdotool: uc_gui_click_captcha 鼠标控制
+      #    - 其他: 解压、网络工具
+      # =========================
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            xvfb \
+            xdotool \
+            wget \
+            curl \
+            jq \
+            p7zip-full \
+            unzip \
+            pulseaudio \
+            alsa-utils \
+            ffmpeg \
+            libnss3 \
+            libgbm1 \
+            libasound2
+
+      # =========================
+      # 🟡 4️⃣ 启动虚拟音频
+      #    Buster 需要麦克风权限播放音频解题
+      # =========================
+      - name: 启动虚拟音频设备
+        run: |
+          pulseaudio --start --exit-idle-time=-1 --daemon || true
+          sleep 1
+          pactl load-module module-null-sink   sink_name=virtual_speaker   sink_properties=device.description=VirtualSpeaker || true
+          pactl set-default-sink   virtual_speaker || true
+          pactl load-module module-virtual-source source_name=virtual_mic   master=virtual_speaker.monitor || true
+          pactl set-default-source virtual_mic || true
+          echo "🔊 虚拟音频设备已启动"
+          pactl list short sinks || true
+
+      # =========================
+      # 🟡 5️⃣ 安装 Python 依赖
+      #    seleniumbase uc 模式 + requests
+      # =========================
+      - name: 安装 Python 依赖
+        run: |
+          pip install -q seleniumbase requests
+          # 安装 UC 模式所需的 chromedriver（undetected-chromedriver）
+          python -c "from seleniumbase import SB; print('SeleniumBase OK')"
+
+      # =========================
+      # 🟡 6️⃣ 安装 Chrome（UC 模式需要 stable channel）
+      # =========================
+      - name: 安装 Google Chrome
+        run: |
+          wget -q -O /tmp/google-chrome.deb \
+            https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y /tmp/google-chrome.deb || \
+            sudo dpkg -i /tmp/google-chrome.deb || true
+          sudo apt-get install -f -y || true
+          google-chrome --version
+
+      # =========================
+      # 🟡 7️⃣ 下载并解压 Buster 扩展
+      #    用于自动解决 reCAPTCHA（登录页）
+      #    注意：UC 模式通过 --load-extension 加载 unpacked 扩展
+      # =========================
+      - name: 下载 Buster 扩展
+        run: |
+          mkdir -p scripts/extensions/buster
+          wget -q -O scripts/extensions/buster/buster.zip \
+            https://github.com/dessant/buster/releases/download/v3.1.0/buster_captcha_solver_for_humans-3.1.0-chrome.zip
+          echo "✅ Buster 下载完成"
+
+      - name: 解压 Buster 扩展
+        run: |
+          mkdir -p scripts/extensions/buster/unpacked
+          7z x -y scripts/extensions/buster/buster.zip \
+            -oscripts/extensions/buster/unpacked > /dev/null
+          echo "📦 Buster 解压完成"
+          # 确认 manifest.json 存在
+          ls scripts/extensions/buster/unpacked/manifest.json && \
+            echo "✅ manifest.json 确认" || \
+            (echo "❌ manifest.json 未找到，检查解压结构：" && \
+             ls -R scripts/extensions/buster/unpacked | head -30)
+
+      # =========================
+      # 🟡 8️⃣ 调试 IP（确认 WARP 生效）
+      # =========================
+      - name: 检查当前 IP
+        run: |
+          echo "🌍 当前 IP:"
+          curl -s https://api.ipify.org && echo
+          echo "📍 IP 详情:"
+          curl -s https://ipinfo.io | jq . || curl -s https://ipinfo.io
+
+      # =========================
+      # 🟡 9️⃣ 复制脚本到工作目录
+      # =========================
+      - name: 复制 makecoins.py
+        run: |
+          # makecoins.py 可以放在私有仓库根目录，也可以在本仓库
+          # 优先使用私有仓库中的版本
+          if [ -f scripts/makecoins.py ]; then
+            cp scripts/makecoins.py ./makecoins.py
+            echo "✅ 使用私有仓库中的 makecoins.py"
+          else
+            echo "📝 使用当前仓库的 makecoins.py"
+          fi
+          ls -la makecoins.py
+
+      # =========================
+      # 🟡 🔟 运行脚本
+      #    xvfb-run: 提供虚拟显示（headed=True + Xvfb）
+      #    BUSTER_EXT_PATH: 告诉脚本 Buster 扩展位置
+      #    SCREENSHOTS_DIR: 截图保存目录
+      # =========================
+      - name: 运行 makecoins.py
+        env:
+          TEO_EMAIL:      ${{ secrets.TEO_EMAIL }}
+          TEO_PASSWORD:   ${{ secrets.TEO_PASSWORD }}
+          TG_TOKEN:       ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID:     ${{ secrets.TG_CHAT_ID }}
+          BUSTER_EXT_PATH: ${{ github.workspace }}/scripts/extensions/buster/unpacked
+          SCREENSHOTS_DIR: ${{ github.workspace }}/screenshots
+          DISPLAY: ":99"
+        run: |
+          mkdir -p screenshots
+          # 启动 Xvfb（xvfb-run 自动管理）
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+            python makecoins.py
+        # 即使失败也继续（用于上传截图）
+        continue-on-error: true
+
+      # =========================
+      # 🟡 1️⃣1️⃣ 上传截图 Artifacts
+      # =========================
+      - name: 上传截图
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: teoheberg-screenshots-${{ github.run_id }}
+          path: screenshots/
+          if-no-files-found: warn
+          retention-days: 7
