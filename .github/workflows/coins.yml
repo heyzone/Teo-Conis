@@ -1,22 +1,23 @@
-name: teoheberg earn coins
+name: teo-earn-coins
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 8,16 * * *"
+    - cron: "40 10 */28 * *"   # 每小时 :40 运行一次
 
 jobs:
   run:
     runs-on: ubuntu-22.04
-    timeout-minutes: 25
+    timeout-minutes: 20
+
     steps:
       # =========================
-      # 0️⃣ 当前仓库
+      # 🟡 0️⃣ 当前仓库
       # =========================
       - uses: actions/checkout@v4
 
       # =========================
-      # ⭐ 私有仓库
+      # 🟡 ⭐ 私有仓库（含 makecoins.js）
       # =========================
       - name: Checkout private repo
         uses: actions/checkout@v4
@@ -26,132 +27,147 @@ jobs:
           path: scripts
 
       # =========================
-      # 1️⃣ Python
+      # 🟡 Node 环境
       # =========================
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          python-version: "3.11"
+          node-version: 20
 
       # =========================
-      # 2️⃣ 系统依赖
-      #
-      # ❌ 不安装 google-chrome-stable
-      #    SeleniumBase UC mode 自己管理 Chrome，
-      #    手动安装 Chrome 反而可能版本冲突
-      #
-      # ✅ xvfb   : 虚拟显示（Linux headed=False，xvfb-run 管理）
-      # ✅ xdotool: uc_gui_click_captcha 底层鼠标依赖
+      # 🟡 1️⃣ WARP（提供干净 IP，降低 reCAPTCHA 风险）
+      # =========================
+      - name: 创建 WARP 网络
+        uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+
+      # =========================
+      # 🟡 2️⃣ 系统依赖
+      #    xvfb        : 虚拟显示（headless:false 必须）
+      #    pulseaudio  : 虚拟音频（Buster 音频解题需要）
+      #    p7zip-full  : 解压 Buster zip
       # =========================
       - name: 安装系统依赖
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
             xvfb \
-            xdotool \
             wget \
+            unzip \
             curl \
             jq \
-            libnss3 \
-            libgbm1 \
-            libasound2 \
-            libxss1 \
-            libxtst6
+            p7zip-full \
+            pulseaudio \
+            alsa-utils \
+            ffmpeg
+
+          # 启动虚拟音频设备（Buster 音频验证需要能播放音频）
+          pulseaudio --start --exit-idle-time=-1 || true
+          sleep 1
+          pactl load-module module-null-sink \
+            sink_name=virtual_speaker \
+            sink_properties=device.description=VirtualSpeaker || true
+          pactl set-default-sink virtual_speaker || true
+          pactl load-module module-virtual-source \
+            source_name=virtual_mic \
+            master=virtual_speaker.monitor || true
+          pactl set-default-source virtual_mic || true
+          echo "🔊 虚拟音频已就绪"
 
       # =========================
-      # 3️⃣ gost（SOCKS5 → HTTP 代理转换）
+      # 🟡 3️⃣ 安装 Playwright + Chromium
       # =========================
-      - name: 安装 gost
+      - name: 安装 Playwright
         run: |
-          GOST_VER="2.11.5"
-          wget -q -O /tmp/gost.gz \
-            "https://github.com/ginuerzh/gost/releases/download/v${GOST_VER}/gost-linux-amd64-${GOST_VER}.gz"
-          gunzip -f /tmp/gost.gz
-          GOST_FILE=$(ls /tmp/gost-linux-amd64-* 2>/dev/null | grep -v gz | head -1 || echo /tmp/gost)
-          sudo mv "$GOST_FILE" /usr/local/bin/gost
-          sudo chmod +x /usr/local/bin/gost
-          gost -V 2>&1 || true
-          echo "✅ gost 完成"
+          cd scripts
+          npm init -y
+          npm install playwright
+          npx playwright install chromium
+          npx playwright install-deps chromium
+          echo "✅ Playwright + Chromium 安装完成"
 
       # =========================
-      # 4️⃣ Python 依赖
-      #    seleniumbase 会自动下载并管理 Chrome + chromedriver
+      # 🟡 4️⃣ 下载并解压 Buster 扩展
       # =========================
-      - name: 安装 Python 依赖
+      - name: 下载 Buster 扩展
         run: |
-          pip install -q seleniumbase requests
-          # 让 seleniumbase 提前下载 chrome + chromedriver
-          # UC mode 使用 undetected-chromedriver 自带的 chrome
-          python -c "
-          import subprocess, sys
-          r = subprocess.run(
-              [sys.executable, '-m', 'seleniumbase', 'install', 'chromedriver'],
-              capture_output=True, text=True, timeout=120
-          )
-          print(r.stdout[-300:] if r.stdout else '')
-          if r.returncode != 0:
-              print('stderr:', r.stderr[-200:])
-          " || true
+          mkdir -p scripts/extensions/buster
+          wget -q -O scripts/extensions/buster/buster.zip \
+            https://github.com/dessant/buster/releases/download/v3.1.0/buster_captcha_solver_for_humans-3.1.0-chrome.zip
+          echo "✅ Buster 下载完成"
+
+      - name: 解压 Buster 扩展
+        run: |
+          mkdir -p scripts/extensions/buster/unpacked
+          7z x -y scripts/extensions/buster/buster.zip \
+            -oscripts/extensions/buster/unpacked > /dev/null
+          echo "📦 Buster 解压完成"
+          # 验证 manifest.json 存在
+          ls scripts/extensions/buster/unpacked/manifest.json && \
+            echo "✅ manifest.json OK" || \
+            (echo "❌ manifest.json 缺失，目录结构：" && \
+             ls -R scripts/extensions/buster/unpacked | head -20)
 
       # =========================
-      # 5️⃣ 检查 Runner IP
+      # 🟡 5️⃣ 准备 makecoins.js
       # =========================
-      - name: 检查 Runner IP
+      - name: 准备 makecoins.js
         run: |
-          echo "🌍 Runner IP: $(curl -s --max-time 5 https://api.ipify.org || echo unknown)"
-
-      # =========================
-      # 6️⃣ 准备脚本
-      # =========================
-      - name: 准备 makecoins.py
-        run: |
-          if [ -f scripts/makecoins.py ]; then
-            cp scripts/makecoins.py ./makecoins.py
-            echo "✅ 私有仓库版本"
+          # 优先使用私有仓库中的版本
+          if [ -f scripts/makecoins.js ]; then
+            echo "✅ 使用私有仓库的 makecoins.js"
           else
-            echo "📝 当前仓库版本"
+            echo "📝 私有仓库中未找到 makecoins.js"
+            ls scripts/ || true
           fi
-          ls -la makecoins.py
 
       # =========================
-      # 7️⃣ 运行
-      #
-      # Linux 下脚本内 headed=False，Chrome 跑在 xvfb-run 的虚拟显示里
-      # uc_gui_click_captcha 通过 xdotool 控制鼠标，需要 DISPLAY 环境变量
-      #
-      # PROXY_LIST Secret 格式（每行一个）：
-      #   socks5://user:pass@1.2.3.4:1080
-      #   socks5://user:pass@5.6.7.8:1080
-      #
-      # 节点策略：
-      #   验证连通 → 启全新 Chrome → uc_gui_click_captcha
-      #   → 出现图片挑战(bframe) = IP差 → blocked → 换节点
-      #   → 每节点最多3次，blocked 立即换
+      # 🟡 6️⃣ 检查 IP（确认 WARP 生效）
       # =========================
-      - name: 运行 makecoins.py
-        env:
-          TEO_EMAIL:       ${{ secrets.TEO_EMAIL }}
-          TEO_PASSWORD:    ${{ secrets.TEO_PASSWORD }}
-          TG_TOKEN:        ${{ secrets.TG_TOKEN }}
-          TG_CHAT_ID:      ${{ secrets.TG_CHAT_ID }}
-          PROXY_LIST:      ${{ secrets.TEO_PROXY_LIST }}
-          GOST_BIN:        /usr/local/bin/gost
-          SCREENSHOTS_DIR: ${{ github.workspace }}/screenshots
+      - name: 检查当前 IP
         run: |
-          mkdir -p screenshots
+          echo "🌍 IP: $(curl -s https://api.ipify.org)"
+          curl -s https://ipinfo.io | jq '{ip,city,country,org}' || \
+            curl -s https://ipinfo.io
+
+      # =========================
+      # 🟡 7️⃣ 运行脚本
+      #
+      # 环境变量说明：
+      #   TEO_EMAIL      : TeoHeberg 登录邮箱
+      #   TEO_PASSWORD   : TeoHeberg 登录密码
+      #   TG_TOKEN       : Telegram Bot Token（通知用）
+      #   TG_CHAT_ID     : Telegram Chat ID（通知目标）
+      #   MAX_RETRY      : 最大重试次数（默认 3）
+      #
+      # xvfb-run 说明：
+      #   Playwright headless:false 需要虚拟显示
+      #   Buster 扩展在真实显示环境下才能正常工作
+      # =========================
+      - name: 运行 makecoins.js
+        env:
+          TEO_EMAIL:    ${{ secrets.TEO_EMAIL }}
+          TEO_PASSWORD: ${{ secrets.TEO_PASSWORD }}
+          TG_TOKEN:     ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
+          MAX_RETRY:    "3"
+        run: |
+          mkdir -p scripts/screenshots
           xvfb-run --auto-servernum \
             --server-args="-screen 0 1280x900x24 -ac" \
-            python makecoins.py
+            node scripts/makecoins.js
         continue-on-error: true
 
       # =========================
-      # 8️⃣ 上传截图
+      # 🟡 8️⃣ 上传截图
       # =========================
       - name: 上传截图
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: teoheberg-screenshots-${{ github.run_id }}
-          path: screenshots/
+          name: teo-screenshots-${{ github.run_id }}
+          path: scripts/screenshots/
           if-no-files-found: warn
           retention-days: 7
