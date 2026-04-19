@@ -1,23 +1,22 @@
-name: teoheberg earn coins (WARP + Playwright)
+name: teoheberg earn coins (WARP + Proxy)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 8,16 * * *"   # 每天 UTC 8:00 和 16:00（北京时间 16:00 和 00:00）
+    - cron: "0 8,16 * * *"   # UTC 8:00 和 16:00，每天两次
 
 jobs:
   run:
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
-
+    timeout-minutes: 25
     steps:
       # =========================
-      # 当前仓库
+      # 0️⃣ 当前仓库
       # =========================
       - uses: actions/checkout@v4
 
       # =========================
-      # 私有仓库（存放脚本和扩展）
+      # ⭐ 私有仓库（含 makecoins.py）
       # =========================
       - name: Checkout private repo
         uses: actions/checkout@v4
@@ -27,7 +26,7 @@ jobs:
           path: scripts
 
       # =========================
-      # WARP（欧洲IP，提高成功率）
+      # 1️⃣ WARP（备用，主要靠 SOCKS5 节点）
       # =========================
       - name: 创建 WARP 网络
         uses: fscarmen/warp-on-actions@v1.3
@@ -36,94 +35,155 @@ jobs:
           mode: client
 
       # =========================
-      # Node.js 环境
+      # 2️⃣ Python 环境
       # =========================
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          node-version: 20
+          python-version: "3.11"
 
       # =========================
-      # 系统依赖（音频 + xvfb + 解压工具）
+      # 3️⃣ 系统依赖
+      #    xvfb    : 虚拟显示（headed=True 必须）
+      #    xdotool : uc_gui_click_captcha 鼠标控制
+      #    pulseaudio: 虚拟音频
       # =========================
       - name: 安装系统依赖
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            xvfb wget curl jq p7zip-full unzip \
-            pulseaudio alsa-utils ffmpeg \
-            libnss3 libgbm1 libasound2
+            xvfb \
+            xdotool \
+            wget \
+            curl \
+            jq \
+            unzip \
+            pulseaudio \
+            alsa-utils \
+            libnss3 \
+            libgbm1 \
+            libasound2
 
       # =========================
-      # 启动虚拟音频设备（Buster 音频识别关键）
+      # 4️⃣ 安装 Google Chrome stable
       # =========================
-      - name: 启动虚拟音频设备
+      - name: 安装 Google Chrome
+        run: |
+          wget -q -O /tmp/chrome.deb \
+            https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y /tmp/chrome.deb 2>/dev/null || \
+            (sudo dpkg -i /tmp/chrome.deb; sudo apt-get install -f -y)
+          google-chrome --version
+
+      # =========================
+      # 5️⃣ 虚拟音频（避免无音频设备报错）
+      # =========================
+      - name: 启动虚拟音频
         run: |
           pulseaudio --start --exit-idle-time=-1 --daemon || true
-          sleep 2
-          pactl load-module module-null-sink sink_name=virtual_speaker || true
+          sleep 1
+          pactl load-module module-null-sink \
+            sink_name=virtual_speaker \
+            sink_properties=device.description=VirtualSpeaker || true
           pactl set-default-sink virtual_speaker || true
-          pactl load-module module-virtual-source source_name=virtual_mic master=virtual_speaker.monitor || true
+          pactl load-module module-virtual-source \
+            source_name=virtual_mic \
+            master=virtual_speaker.monitor || true
           pactl set-default-source virtual_mic || true
-          echo "🔊 虚拟音频设备状态："
-          pactl list short sinks
-          pactl list short sources
+          echo "🔊 虚拟音频启动完成"
 
       # =========================
-      # 安装 Playwright + Chromium
+      # 6️⃣ 安装 gost（SOCKS5 → HTTP 代理转换）
+      #    用于将 socks5://user:pass@host:port 格式节点
+      #    转为 Chrome 可直接使用的 HTTP 代理
       # =========================
-      - name: Install Playwright
+      - name: 安装 gost
         run: |
-          cd scripts
-          npm init -y
-          npm install playwright
-          npx playwright install chromium --with-deps
+          GOST_VER="2.11.5"
+          wget -q -O /tmp/gost.gz \
+            "https://github.com/ginuerzh/gost/releases/download/v${GOST_VER}/gost-linux-amd64-${GOST_VER}.gz"
+          gunzip -f /tmp/gost.gz
+          sudo mv /tmp/gost-linux-amd64-${GOST_VER} /usr/local/bin/gost || \
+            sudo mv /tmp/gost /usr/local/bin/gost
+          sudo chmod +x /usr/local/bin/gost
+          gost -V 2>&1 || echo "gost 已安装"
 
       # =========================
-      # 下载并解压 Buster 扩展
+      # 7️⃣ 安装 Python 依赖
       # =========================
-      - name: 下载 Buster 扩展
+      - name: 安装 Python 依赖
         run: |
-          mkdir -p scripts/extensions/buster
-          wget -q -O scripts/extensions/buster/buster.zip \
-            https://github.com/dessant/buster/releases/download/v3.1.0/buster_captcha_solver_for_humans-3.1.0-chrome.zip
-
-      - name: 解压 Buster 扩展
-        run: |
-          mkdir -p scripts/extensions/buster/unpacked
-          7z x -y scripts/extensions/buster/buster.zip -oscripts/extensions/buster/unpacked > /dev/null
-          ls scripts/extensions/buster/unpacked/manifest.json && echo "✅ Buster 解压成功" || echo "⚠️ Buster manifest 未找到"
+          pip install -q seleniumbase requests
+          # 预下载 chromedriver（避免运行时超时）
+          python -c "
+          import subprocess, sys
+          r = subprocess.run(
+              [sys.executable, '-m', 'seleniumbase', 'install', 'chromedriver'],
+              capture_output=True, text=True
+          )
+          print(r.stdout[-500:] if r.stdout else '')
+          " || true
 
       # =========================
-      # 检查当前 IP（调试用）
+      # 8️⃣ 检查 IP
       # =========================
       - name: 检查当前 IP
         run: |
-          echo "🌍 当前 IP: $(curl -s https://api.ipify.org)"
-          curl -s https://ipinfo.io | jq . || true
+          echo "🌍 IP: $(curl -s https://api.ipify.org)"
+          curl -s https://ipinfo.io | jq '{ip,city,country,org}' || true
 
       # =========================
-      # 运行 earn-coins.js
+      # 9️⃣ 准备脚本
       # =========================
-      - name: 运行 earn-coins.js
-        env:
-          TEO_EMAIL: ${{ secrets.TEO_EMAIL }}
-          TEO_PASSWORD: ${{ secrets.TEO_PASSWORD }}
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      - name: 准备 makecoins.py
         run: |
-          mkdir -p scripts/screenshots
-          cd scripts
-          xvfb-run -a --server-args="-screen 0 1920x1080x24 -ac" \
-            node earn-coins.js
+          if [ -f scripts/makecoins.py ]; then
+            cp scripts/makecoins.py ./makecoins.py
+            echo "✅ 使用私有仓库的 makecoins.py"
+          else
+            echo "📝 使用当前仓库的 makecoins.py"
+          fi
+          ls -la makecoins.py
 
       # =========================
-      # 上传截图（无论成功失败都上传）
+      # 🔟 运行脚本
+      #
+      # PROXY_LIST 格式（每行一个 SOCKS5 节点）：
+      #   socks5://user:pass@host1:port
+      #   socks5://user:pass@host2:port
+      #   socks5://host3:port
+      #
+      # 策略：
+      #   - 每个节点最多尝试 3 次
+      #   - uc_gui_click_captcha 一次点击过 reCAPTCHA
+      #   - 出现图片挑战 → IP 质量差 → 切换下一节点
+      #   - xvfb-run 提供虚拟显示（headed=True 需要）
+      # =========================
+      - name: 运行 makecoins.py
+        env:
+          TEO_EMAIL:      ${{ secrets.TEO_EMAIL }}
+          TEO_PASSWORD:   ${{ secrets.TEO_PASSWORD }}
+          TG_TOKEN:       ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID:     ${{ secrets.TG_CHAT_ID }}
+          # 多个 SOCKS5 节点，每行一个，存在同一个 Secret 里用换行分隔
+          PROXY_LIST:     ${{ secrets.TEO_PROXY_LIST }}
+          GOST_BIN:       /usr/local/bin/gost
+          SCREENSHOTS_DIR: ${{ github.workspace }}/screenshots
+        run: |
+          mkdir -p screenshots
+          xvfb-run --auto-servernum \
+            --server-args="-screen 0 1280x900x24 -ac" \
+            python makecoins.py
+        continue-on-error: true
+
+      # =========================
+      # 1️⃣1️⃣ 上传截图
       # =========================
       - name: 上传截图
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: teoheberg-screenshots-${{ github.run_id }}
-          path: scripts/screenshots/
+          path: screenshots/
+          if-no-files-found: warn
           retention-days: 7
