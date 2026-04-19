@@ -21,7 +21,7 @@ jobs:
       - name: Checkout private repo
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/TeoCoins-auto
+          repository: ${{ github.repository_owner }}/gaming4free-auto
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: scripts
 
@@ -72,7 +72,6 @@ jobs:
           sudo chmod +x /usr/local/bin/gost
           gost -V 2>&1 || true
           echo "✅ gost 完成"
-
 
       # =========================
       # 4️⃣ Python 依赖
