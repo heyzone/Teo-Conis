@@ -1,9 +1,9 @@
-name: teoheberg earn coins (WARP + Proxy)
+name: teoheberg earn coins
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 8,16 * * *"   # UTC 8:00 和 16:00，每天两次
+    - cron: "0 8,16 * * *"   # UTC 8:00 / 16:00
 
 jobs:
   run:
@@ -26,16 +26,7 @@ jobs:
           path: scripts
 
       # =========================
-      # 1️⃣ WARP（备用，主要靠 SOCKS5 节点）
-      # =========================
-      - name: 创建 WARP 网络
-        uses: fscarmen/warp-on-actions@v1.3
-        with:
-          stack: dual
-          mode: client
-
-      # =========================
-      # 2️⃣ Python 环境
+      # 1️⃣ Python
       # =========================
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -43,10 +34,9 @@ jobs:
           python-version: "3.11"
 
       # =========================
-      # 3️⃣ 系统依赖
-      #    xvfb    : 虚拟显示（headed=True 必须）
-      #    xdotool : uc_gui_click_captcha 鼠标控制
-      #    pulseaudio: 虚拟音频
+      # 2️⃣ 系统依赖
+      #    xvfb    : 虚拟显示（headed=True + uc_gui_click_captcha 必须）
+      #    xdotool : uc_gui_click_captcha 底层鼠标控制
       # =========================
       - name: 安装系统依赖
         run: |
@@ -57,15 +47,12 @@ jobs:
             wget \
             curl \
             jq \
-            unzip \
-            pulseaudio \
-            alsa-utils \
             libnss3 \
             libgbm1 \
             libasound2
 
       # =========================
-      # 4️⃣ 安装 Google Chrome stable
+      # 3️⃣ Google Chrome stable
       # =========================
       - name: 安装 Google Chrome
         run: |
@@ -76,26 +63,8 @@ jobs:
           google-chrome --version
 
       # =========================
-      # 5️⃣ 虚拟音频（避免无音频设备报错）
-      # =========================
-      - name: 启动虚拟音频
-        run: |
-          pulseaudio --start --exit-idle-time=-1 --daemon || true
-          sleep 1
-          pactl load-module module-null-sink \
-            sink_name=virtual_speaker \
-            sink_properties=device.description=VirtualSpeaker || true
-          pactl set-default-sink virtual_speaker || true
-          pactl load-module module-virtual-source \
-            source_name=virtual_mic \
-            master=virtual_speaker.monitor || true
-          pactl set-default-source virtual_mic || true
-          echo "🔊 虚拟音频启动完成"
-
-      # =========================
-      # 6️⃣ 安装 gost（SOCKS5 → HTTP 代理转换）
-      #    用于将 socks5://user:pass@host:port 格式节点
-      #    转为 Chrome 可直接使用的 HTTP 代理
+      # 4️⃣ gost（SOCKS5 → HTTP 代理）
+      #    Chrome 原生不支持带认证的 SOCKS5，gost 做转换
       # =========================
       - name: 安装 gost
         run: |
@@ -103,71 +72,71 @@ jobs:
           wget -q -O /tmp/gost.gz \
             "https://github.com/ginuerzh/gost/releases/download/v${GOST_VER}/gost-linux-amd64-${GOST_VER}.gz"
           gunzip -f /tmp/gost.gz
-          sudo mv /tmp/gost-linux-amd64-${GOST_VER} /usr/local/bin/gost || \
-            sudo mv /tmp/gost /usr/local/bin/gost
+          # 文件名可能带版本号
+          GOST_FILE=$(ls /tmp/gost* 2>/dev/null | grep -v gz | head -1)
+          sudo mv "$GOST_FILE" /usr/local/bin/gost
           sudo chmod +x /usr/local/bin/gost
-          gost -V 2>&1 || echo "gost 已安装"
+          gost -V 2>&1 || true
+          echo "✅ gost 安装完成"
 
       # =========================
-      # 7️⃣ 安装 Python 依赖
+      # 5️⃣ Python 依赖
       # =========================
       - name: 安装 Python 依赖
         run: |
           pip install -q seleniumbase requests
-          # 预下载 chromedriver（避免运行时超时）
+          # 预下载匹配版本的 chromedriver
           python -c "
           import subprocess, sys
           r = subprocess.run(
               [sys.executable, '-m', 'seleniumbase', 'install', 'chromedriver'],
-              capture_output=True, text=True
+              capture_output=True, text=True, timeout=120
           )
-          print(r.stdout[-500:] if r.stdout else '')
+          print(r.stdout[-300:] if r.stdout else 'no output')
+          if r.returncode != 0:
+              print(r.stderr[-200:])
           " || true
 
       # =========================
-      # 8️⃣ 检查 IP
+      # 6️⃣ 检查直连 IP
       # =========================
-      - name: 检查当前 IP
+      - name: 检查直连 IP
         run: |
-          echo "🌍 IP: $(curl -s https://api.ipify.org)"
-          curl -s https://ipinfo.io | jq '{ip,city,country,org}' || true
+          echo "🌍 Runner IP: $(curl -s --max-time 5 https://api.ipify.org)"
 
       # =========================
-      # 9️⃣ 准备脚本
+      # 7️⃣ 准备脚本
       # =========================
       - name: 准备 makecoins.py
         run: |
           if [ -f scripts/makecoins.py ]; then
             cp scripts/makecoins.py ./makecoins.py
-            echo "✅ 使用私有仓库的 makecoins.py"
+            echo "✅ 私有仓库 makecoins.py"
           else
-            echo "📝 使用当前仓库的 makecoins.py"
+            echo "📝 当前仓库 makecoins.py"
           fi
           ls -la makecoins.py
 
       # =========================
-      # 🔟 运行脚本
+      # 8️⃣ 运行
       #
-      # PROXY_LIST 格式（每行一个 SOCKS5 节点）：
-      #   socks5://user:pass@host1:port
-      #   socks5://user:pass@host2:port
-      #   socks5://host3:port
+      # PROXY_LIST Secret 格式（每行一个节点）：
+      #   socks5://user:pass@1.2.3.4:1080
+      #   socks5://user:pass@5.6.7.8:1080
       #
-      # 策略：
-      #   - 每个节点最多尝试 3 次
-      #   - uc_gui_click_captcha 一次点击过 reCAPTCHA
-      #   - 出现图片挑战 → IP 质量差 → 切换下一节点
-      #   - xvfb-run 提供虚拟显示（headed=True 需要）
+      # 流程：
+      #   验证代理连通 → 启动全新 Chrome → uc_gui_click_captcha 过验证
+      #   出现图片挑战 → 换节点（IP 质量不足）
+      #   每节点 3 次，全部失败才切换下一节点
       # =========================
       - name: 运行 makecoins.py
         env:
-          TEO_EMAIL:      ${{ secrets.TEO_EMAIL }}
-          TEO_PASSWORD:   ${{ secrets.TEO_PASSWORD }}
-          TG_TOKEN:       ${{ secrets.TG_TOKEN }}
-          TG_CHAT_ID:     ${{ secrets.TG_CHAT_ID }}
-          # 多个 SOCKS5 节点，每行一个，存在同一个 Secret 里用换行分隔
-          PROXY_LIST:     ${{ secrets.TEO_PROXY_LIST }}
-          GOST_BIN:       /usr/local/bin/gost
+          TEO_EMAIL:       ${{ secrets.TEO_EMAIL }}
+          TEO_PASSWORD:    ${{ secrets.TEO_PASSWORD }}
+          TG_TOKEN:        ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID:      ${{ secrets.TG_CHAT_ID }}
+          PROXY_LIST:      ${{ secrets.TEO_PROXY_LIST }}
+          GOST_BIN:        /usr/local/bin/gost
           SCREENSHOTS_DIR: ${{ github.workspace }}/screenshots
         run: |
           mkdir -p screenshots
@@ -177,7 +146,7 @@ jobs:
         continue-on-error: true
 
       # =========================
-      # 1️⃣1️⃣ 上传截图
+      # 9️⃣ 上传截图
       # =========================
       - name: 上传截图
         uses: actions/upload-artifact@v4
