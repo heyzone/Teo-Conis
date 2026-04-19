@@ -3,7 +3,7 @@ name: teoheberg earn coins
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 8,16 * * *"   # UTC 8:00 / 16:00
+    - cron: "0 8,16 * * *"
 
 jobs:
   run:
@@ -16,12 +16,12 @@ jobs:
       - uses: actions/checkout@v4
 
       # =========================
-      # ⭐ 私有仓库（含 makecoins.py）
+      # ⭐ 私有仓库
       # =========================
       - name: Checkout private repo
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/TeoCoins-auto
+          repository: ${{ github.repository_owner }}/gaming4free-auto
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: scripts
 
@@ -35,8 +35,13 @@ jobs:
 
       # =========================
       # 2️⃣ 系统依赖
-      #    xvfb    : 虚拟显示（headed=True + uc_gui_click_captcha 必须）
-      #    xdotool : uc_gui_click_captcha 底层鼠标控制
+      #
+      # ❌ 不安装 google-chrome-stable
+      #    SeleniumBase UC mode 自己管理 Chrome，
+      #    手动安装 Chrome 反而可能版本冲突
+      #
+      # ✅ xvfb   : 虚拟显示（Linux headed=False，xvfb-run 管理）
+      # ✅ xdotool: uc_gui_click_captcha 底层鼠标依赖
       # =========================
       - name: 安装系统依赖
         run: |
@@ -49,22 +54,12 @@ jobs:
             jq \
             libnss3 \
             libgbm1 \
-            libasound2
+            libasound2 \
+            libxss1 \
+            libxtst6
 
       # =========================
-      # 3️⃣ Google Chrome stable
-      # =========================
-      - name: 安装 Google Chrome
-        run: |
-          wget -q -O /tmp/chrome.deb \
-            https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y /tmp/chrome.deb 2>/dev/null || \
-            (sudo dpkg -i /tmp/chrome.deb; sudo apt-get install -f -y)
-          google-chrome --version
-
-      # =========================
-      # 4️⃣ gost（SOCKS5 → HTTP 代理）
-      #    Chrome 原生不支持带认证的 SOCKS5，gost 做转换
+      # 3️⃣ gost（SOCKS5 → HTTP 代理转换）
       # =========================
       - name: 安装 gost
         run: |
@@ -72,62 +67,66 @@ jobs:
           wget -q -O /tmp/gost.gz \
             "https://github.com/ginuerzh/gost/releases/download/v${GOST_VER}/gost-linux-amd64-${GOST_VER}.gz"
           gunzip -f /tmp/gost.gz
-          # 文件名可能带版本号
-          GOST_FILE=$(ls /tmp/gost* 2>/dev/null | grep -v gz | head -1)
+          GOST_FILE=$(ls /tmp/gost-linux-amd64-* 2>/dev/null | grep -v gz | head -1 || echo /tmp/gost)
           sudo mv "$GOST_FILE" /usr/local/bin/gost
           sudo chmod +x /usr/local/bin/gost
           gost -V 2>&1 || true
-          echo "✅ gost 安装完成"
+          echo "✅ gost 完成"
 
       # =========================
-      # 5️⃣ Python 依赖
+      # 4️⃣ Python 依赖
+      #    seleniumbase 会自动下载并管理 Chrome + chromedriver
       # =========================
       - name: 安装 Python 依赖
         run: |
           pip install -q seleniumbase requests
-          # 预下载匹配版本的 chromedriver
+          # 让 seleniumbase 提前下载 chrome + chromedriver
+          # UC mode 使用 undetected-chromedriver 自带的 chrome
           python -c "
           import subprocess, sys
           r = subprocess.run(
               [sys.executable, '-m', 'seleniumbase', 'install', 'chromedriver'],
               capture_output=True, text=True, timeout=120
           )
-          print(r.stdout[-300:] if r.stdout else 'no output')
+          print(r.stdout[-300:] if r.stdout else '')
           if r.returncode != 0:
-              print(r.stderr[-200:])
+              print('stderr:', r.stderr[-200:])
           " || true
 
       # =========================
-      # 6️⃣ 检查直连 IP
+      # 5️⃣ 检查 Runner IP
       # =========================
-      - name: 检查直连 IP
+      - name: 检查 Runner IP
         run: |
-          echo "🌍 Runner IP: $(curl -s --max-time 5 https://api.ipify.org)"
+          echo "🌍 Runner IP: $(curl -s --max-time 5 https://api.ipify.org || echo unknown)"
 
       # =========================
-      # 7️⃣ 准备脚本
+      # 6️⃣ 准备脚本
       # =========================
       - name: 准备 makecoins.py
         run: |
           if [ -f scripts/makecoins.py ]; then
             cp scripts/makecoins.py ./makecoins.py
-            echo "✅ 私有仓库 makecoins.py"
+            echo "✅ 私有仓库版本"
           else
-            echo "📝 当前仓库 makecoins.py"
+            echo "📝 当前仓库版本"
           fi
           ls -la makecoins.py
 
       # =========================
-      # 8️⃣ 运行
+      # 7️⃣ 运行
       #
-      # PROXY_LIST Secret 格式（每行一个节点）：
+      # Linux 下脚本内 headed=False，Chrome 跑在 xvfb-run 的虚拟显示里
+      # uc_gui_click_captcha 通过 xdotool 控制鼠标，需要 DISPLAY 环境变量
+      #
+      # PROXY_LIST Secret 格式（每行一个）：
       #   socks5://user:pass@1.2.3.4:1080
       #   socks5://user:pass@5.6.7.8:1080
       #
-      # 流程：
-      #   验证代理连通 → 启动全新 Chrome → uc_gui_click_captcha 过验证
-      #   出现图片挑战 → 换节点（IP 质量不足）
-      #   每节点 3 次，全部失败才切换下一节点
+      # 节点策略：
+      #   验证连通 → 启全新 Chrome → uc_gui_click_captcha
+      #   → 出现图片挑战(bframe) = IP差 → blocked → 换节点
+      #   → 每节点最多3次，blocked 立即换
       # =========================
       - name: 运行 makecoins.py
         env:
@@ -146,7 +145,7 @@ jobs:
         continue-on-error: true
 
       # =========================
-      # 9️⃣ 上传截图
+      # 8️⃣ 上传截图
       # =========================
       - name: 上传截图
         uses: actions/upload-artifact@v4
