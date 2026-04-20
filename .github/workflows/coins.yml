@@ -3,7 +3,7 @@ name: teo-earn-coins
 on:
   workflow_dispatch:
   schedule:
-    - cron: "40 10 */28 * *"   # 每小时 :40 运行一次
+    - cron: "40 * * * *"   # 每小时 :40 运行
 
 jobs:
   run:
@@ -12,12 +12,12 @@ jobs:
 
     steps:
       # =========================
-      # 🟡 0️⃣ 当前仓库
+      # 0️⃣ 当前仓库
       # =========================
       - uses: actions/checkout@v4
 
       # =========================
-      # 🟡 ⭐ 私有仓库（含 makecoins.js）
+      # ⭐ 私有仓库（含 makecoins.js）
       # =========================
       - name: Checkout private repo
         uses: actions/checkout@v4
@@ -27,7 +27,7 @@ jobs:
           path: scripts
 
       # =========================
-      # 🟡 Node 环境
+      # 1️⃣ Node 环境
       # =========================
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -35,7 +35,7 @@ jobs:
           node-version: 20
 
       # =========================
-      # 🟡 1️⃣ WARP（提供干净 IP，降低 reCAPTCHA 风险）
+      # 2️⃣ WARP（提供干净 IP，降低 reCAPTCHA 风险）
       # =========================
       - name: 创建 WARP 网络
         uses: fscarmen/warp-on-actions@v1.3
@@ -44,10 +44,10 @@ jobs:
           mode: client
 
       # =========================
-      # 🟡 2️⃣ 系统依赖
-      #    xvfb        : 虚拟显示（headless:false 必须）
-      #    pulseaudio  : 虚拟音频（Buster 音频解题需要）
-      #    p7zip-full  : 解压 Buster zip
+      # 3️⃣ 系统依赖
+      #    xvfb       : 虚拟显示（headless:false 必须）
+      #    pulseaudio : 虚拟音频（Buster 音频解题需要）
+      #    p7zip-full : 解压 Buster zip
       # =========================
       - name: 安装系统依赖
         run: |
@@ -63,7 +63,7 @@ jobs:
             alsa-utils \
             ffmpeg
 
-          # 启动虚拟音频设备（Buster 音频验证需要能播放音频）
+          # 启动虚拟音频（Buster 音频验证需要）
           pulseaudio --start --exit-idle-time=-1 || true
           sleep 1
           pactl load-module module-null-sink \
@@ -74,22 +74,31 @@ jobs:
             source_name=virtual_mic \
             master=virtual_speaker.monitor || true
           pactl set-default-source virtual_mic || true
-          echo "🔊 虚拟音频已就绪"
+          echo "🔊 虚拟音频就绪"
 
       # =========================
-      # 🟡 3️⃣ 安装 Playwright + Chromium
+      # 4️⃣ 安装 Node 依赖
+      #
+      # playwright       : 登录页 + Buster（reCAPTCHA）
+      # patchright       : bypass.city Turnstile 专用
+      #   - undetected Playwright，自动 patch CF 检测点
+      #   - API 与 playwright 完全兼容，只换 import
+      #   - 无需 API key，开源免费
       # =========================
-      - name: 安装 Playwright
+      - name: 安装 Node 依赖
         run: |
           cd scripts
           npm init -y
-          npm install playwright
+          npm install playwright patchright
+          # Playwright 下载 Chromium（登录 + Buster 用）
           npx playwright install chromium
           npx playwright install-deps chromium
-          echo "✅ Playwright + Chromium 安装完成"
+          # patchright 下载自己的 Chrome（过 Turnstile 用）
+          npx patchright install chrome
+          echo "✅ playwright + patchright 安装完成"
 
       # =========================
-      # 🟡 4️⃣ 下载并解压 Buster 扩展
+      # 5️⃣ 下载并解压 Buster 扩展
       # =========================
       - name: 下载 Buster 扩展
         run: |
@@ -103,48 +112,45 @@ jobs:
           mkdir -p scripts/extensions/buster/unpacked
           7z x -y scripts/extensions/buster/buster.zip \
             -oscripts/extensions/buster/unpacked > /dev/null
-          echo "📦 Buster 解压完成"
-          # 验证 manifest.json 存在
           ls scripts/extensions/buster/unpacked/manifest.json && \
-            echo "✅ manifest.json OK" || \
-            (echo "❌ manifest.json 缺失，目录结构：" && \
-             ls -R scripts/extensions/buster/unpacked | head -20)
+            echo "✅ Buster manifest OK" || \
+            (echo "❌ manifest 缺失" && ls -R scripts/extensions/buster/unpacked | head -20)
 
       # =========================
-      # 🟡 5️⃣ 准备 makecoins.js
+      # 6️⃣ 准备 makecoins.js
       # =========================
       - name: 准备 makecoins.js
         run: |
-          # 优先使用私有仓库中的版本
           if [ -f scripts/makecoins.js ]; then
-            echo "✅ 使用私有仓库的 makecoins.js"
+            echo "✅ 私有仓库 makecoins.js"
           else
-            echo "📝 私有仓库中未找到 makecoins.js"
+            echo "⚠️ 未找到 makecoins.js，请检查私有仓库"
             ls scripts/ || true
+            exit 1
           fi
 
       # =========================
-      # 🟡 6️⃣ 检查 IP（确认 WARP 生效）
+      # 7️⃣ 检查 IP
       # =========================
-      - name: 检查当前 IP
+      - name: 检查 IP
         run: |
           echo "🌍 IP: $(curl -s https://api.ipify.org)"
-          curl -s https://ipinfo.io | jq '{ip,city,country,org}' || \
-            curl -s https://ipinfo.io
+          curl -s https://ipinfo.io | jq '{ip,city,country,org}' 2>/dev/null || true
 
       # =========================
-      # 🟡 7️⃣ 运行脚本
+      # 8️⃣ 运行脚本
       #
-      # 环境变量说明：
-      #   TEO_EMAIL      : TeoHeberg 登录邮箱
-      #   TEO_PASSWORD   : TeoHeberg 登录密码
-      #   TG_TOKEN       : Telegram Bot Token（通知用）
-      #   TG_CHAT_ID     : Telegram Chat ID（通知目标）
-      #   MAX_RETRY      : 最大重试次数（默认 3）
+      # 两个浏览器实例：
+      #   [1] playwright + Buster → 登录 reCAPTCHA
+      #   [2] patchright          → bypass.city Turnstile
+      # 都需要 xvfb-run 提供虚拟显示（headless:false）
       #
-      # xvfb-run 说明：
-      #   Playwright headless:false 需要虚拟显示
-      #   Buster 扩展在真实显示环境下才能正常工作
+      # Secrets 说明：
+      #   TEO_EMAIL      TeoHeberg 登录邮箱
+      #   TEO_PASSWORD   TeoHeberg 登录密码
+      #   TG_TOKEN       Telegram Bot Token
+      #   TG_CHAT_ID     Telegram Chat ID
+      #   PRIVATE_REPO_TOKEN  私有仓库 PAT
       # =========================
       - name: 运行 makecoins.js
         env:
@@ -161,7 +167,7 @@ jobs:
         continue-on-error: true
 
       # =========================
-      # 🟡 8️⃣ 上传截图
+      # 9️⃣ 上传截图
       # =========================
       - name: 上传截图
         uses: actions/upload-artifact@v4
