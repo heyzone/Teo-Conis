@@ -3,7 +3,7 @@ name: teo-earn-coins
 on:
   workflow_dispatch:
   schedule:
-    - cron: "40 * * * *"   # 每小时 :40 运行
+    - cron: "40 10 */28 * *"   # 每小时 :40 运行
 
 jobs:
   run:
