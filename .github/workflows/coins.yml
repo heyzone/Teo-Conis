@@ -3,22 +3,16 @@ name: teo-earn-coins
 on:
   workflow_dispatch:
   schedule:
-    - cron: "40 10 */28 * *"   # 每小时 :40 运行
+    - cron: "40 * * * *"
 
 jobs:
   run:
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
-      # =========================
-      # 0️⃣ 当前仓库
-      # =========================
       - uses: actions/checkout@v4
 
-      # =========================
-      # ⭐ 私有仓库（含 makecoins.js）
-      # =========================
       - name: Checkout private repo
         uses: actions/checkout@v4
         with:
@@ -26,16 +20,13 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: scripts
 
-      # =========================
-      # 1️⃣ Node 环境
-      # =========================
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       # =========================
-      # 2️⃣ WARP（提供干净 IP，降低 reCAPTCHA 风险）
+      # WARP（提供干净 IP）
       # =========================
       - name: 创建 WARP 网络
         uses: fscarmen/warp-on-actions@v1.3
@@ -44,26 +35,16 @@ jobs:
           mode: client
 
       # =========================
-      # 3️⃣ 系统依赖
-      #    xvfb       : 虚拟显示（headless:false 必须）
-      #    pulseaudio : 虚拟音频（Buster 音频解题需要）
-      #    p7zip-full : 解压 Buster zip
+      # 系统依赖
+      # xvfb + pulseaudio（Buster 音频需要）
       # =========================
       - name: 安装系统依赖
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            xvfb \
-            wget \
-            unzip \
-            curl \
-            jq \
-            p7zip-full \
-            pulseaudio \
-            alsa-utils \
-            ffmpeg
+            xvfb wget unzip curl jq p7zip-full \
+            pulseaudio alsa-utils ffmpeg
 
-          # 启动虚拟音频（Buster 音频验证需要）
           pulseaudio --start --exit-idle-time=-1 || true
           sleep 1
           pactl load-module module-null-sink \
@@ -77,35 +58,28 @@ jobs:
           echo "🔊 虚拟音频就绪"
 
       # =========================
-      # 4️⃣ 安装 Node 依赖
-      #
-      # playwright       : 登录页 + Buster（reCAPTCHA）
-      # patchright       : bypass.city Turnstile 专用
-      #   - undetected Playwright，自动 patch CF 检测点
-      #   - API 与 playwright 完全兼容，只换 import
-      #   - 无需 API key，开源免费
+      # Node 依赖
+      # playwright  : 登录页 reCAPTCHA + Buster
+      # patchright  : bypass.city Turnstile（主方案）
       # =========================
       - name: 安装 Node 依赖
         run: |
           cd scripts
           npm init -y
           npm install playwright patchright
-          # Playwright 下载 Chromium（登录 + Buster 用）
           npx playwright install chromium
           npx playwright install-deps chromium
-          # patchright 下载自己的 Chrome（过 Turnstile 用）
           npx patchright install chrome
           echo "✅ playwright + patchright 安装完成"
 
       # =========================
-      # 5️⃣ 下载并解压 Buster 扩展
+      # Buster 扩展（登录页 reCAPTCHA）
       # =========================
       - name: 下载 Buster 扩展
         run: |
           mkdir -p scripts/extensions/buster
           wget -q -O scripts/extensions/buster/buster.zip \
             https://github.com/dessant/buster/releases/download/v3.1.0/buster_captcha_solver_for_humans-3.1.0-chrome.zip
-          echo "✅ Buster 下载完成"
 
       - name: 解压 Buster 扩展
         run: |
@@ -113,44 +87,54 @@ jobs:
           7z x -y scripts/extensions/buster/buster.zip \
             -oscripts/extensions/buster/unpacked > /dev/null
           ls scripts/extensions/buster/unpacked/manifest.json && \
-            echo "✅ Buster manifest OK" || \
-            (echo "❌ manifest 缺失" && ls -R scripts/extensions/buster/unpacked | head -20)
+            echo "✅ Buster OK" || echo "❌ Buster manifest 缺失"
 
       # =========================
-      # 6️⃣ 准备 makecoins.js
+      # NopeCHA 扩展（bypass.city Turnstile 备用方案）
+      # 用途：patchright 失败时自动切换
+      # 与 Buster 各司其职：
+      #   Buster  → 登录页 reCAPTCHA（Playwright launchPersistentContext）
+      #   NopeCHA → bypass.city Turnstile（独立 Playwright 实例）
+      # =========================
+      - name: 下载 NopeCHA 扩展
+        working-directory: scripts
+        run: |
+          mkdir -p extensions/nopecha
+          wget -q -O extensions/nopecha/chromium.zip \
+            https://github.com/NopeCHALLC/nopecha-extension/releases/latest/download/chromium.zip
+          echo "✅ NopeCHA 下载完成"
+
+      - name: 解压 NopeCHA 扩展
+        working-directory: scripts
+        run: |
+          mkdir -p extensions/nopecha/unpacked
+          7z x -y extensions/nopecha/chromium.zip \
+            -oextensions/nopecha/unpacked > /dev/null
+          echo "📌 NopeCHA manifest:"
+          cat extensions/nopecha/unpacked/manifest.json | \
+            python3 -c "import json,sys; m=json.load(sys.stdin); print(f'name={m[\"name\"]} version={m[\"version\"]}')" || \
+            ls extensions/nopecha/unpacked/
+
+      # =========================
+      # 准备脚本
       # =========================
       - name: 准备 makecoins.js
         run: |
-          if [ -f scripts/makecoins.js ]; then
-            echo "✅ 私有仓库 makecoins.js"
-          else
-            echo "⚠️ 未找到 makecoins.js，请检查私有仓库"
-            ls scripts/ || true
-            exit 1
-          fi
+          ls scripts/makecoins.js && echo "✅ makecoins.js 就绪" || \
+            (echo "❌ 未找到 makecoins.js" && exit 1)
 
-      # =========================
-      # 7️⃣ 检查 IP
-      # =========================
       - name: 检查 IP
         run: |
           echo "🌍 IP: $(curl -s https://api.ipify.org)"
           curl -s https://ipinfo.io | jq '{ip,city,country,org}' 2>/dev/null || true
 
       # =========================
-      # 8️⃣ 运行脚本
-      #
-      # 两个浏览器实例：
-      #   [1] playwright + Buster → 登录 reCAPTCHA
-      #   [2] patchright          → bypass.city Turnstile
-      # 都需要 xvfb-run 提供虚拟显示（headless:false）
-      #
-      # Secrets 说明：
-      #   TEO_EMAIL      TeoHeberg 登录邮箱
-      #   TEO_PASSWORD   TeoHeberg 登录密码
-      #   TG_TOKEN       Telegram Bot Token
-      #   TG_CHAT_ID     Telegram Chat ID
-      #   PRIVATE_REPO_TOKEN  私有仓库 PAT
+      # 运行
+      # 浏览器实例说明：
+      #   [1] Playwright + Buster  → 登录 reCAPTCHA（头部浏览器）
+      #   [2] patchright           → bypass.city Turnstile（主方案）
+      #   [3] Playwright + NopeCHA → bypass.city Turnstile（备用方案）
+      # 实例 [2][3] 在独立进程中启动，与 [1] 互不干扰
       # =========================
       - name: 运行 makecoins.js
         env:
@@ -166,9 +150,6 @@ jobs:
             node scripts/makecoins.js
         continue-on-error: true
 
-      # =========================
-      # 9️⃣ 上传截图
-      # =========================
       - name: 上传截图
         uses: actions/upload-artifact@v4
         if: always()
